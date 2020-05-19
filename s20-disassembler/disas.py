@@ -132,6 +132,9 @@ INSTR_SET = {
     }
 }
 
+INSTR_WITH_NO_REGISTERS = ["halt", "rts", "nop"]
+INSTR_WITH_SUM_REGISTERS = ["ldi", "sti"]
+INSTR_WITH_SHIFT = ["shl", "sal", "shr", "sar"]
 
 ###############
 #   CLASSES   #
@@ -182,7 +185,7 @@ def print_debug(msg):
 
 def get_instruction(op_code, sub_op_code=None):
     """Lookup corresponding assembly language instr given an opcode and sub opcode"""
-    has_sub_op_code = list(INSTR_SET["OP_CODE"][op_code]["SUB_OP_CODE"].keys())[0] is not None
+    has_sub_op_code = op_code_has_sub_op_code(op_code)
     if not has_sub_op_code:
         return INSTR_SET["OP_CODE"][op_code]["SUB_OP_CODE"][None]["INSTRUCTION"]
     else:
@@ -209,12 +212,14 @@ def get_op_code(bits):
     return hex_op_code
 
 
+def op_code_has_sub_op_code(op_code):
+    """Returns True or False depending on whether or not a given opcode has a sub opcode"""
+    return list(INSTR_SET["OP_CODE"][op_code]["SUB_OP_CODE"].keys())[0] is not None
+
+
 def get_sub_op_code(op_code, bits):
     """Sub Opcode defined as last 5 bits of binary, if opcode is 0"""
-    # Lookup instr by op_code, see if it can have a sub opcode.
-    # Instead of doing the lookup, I could have just checked (if opcode == 0),
-    #  but this will work even if non-zero opcodes are given sub opcodes in the future.
-    has_sub_op_code = list(INSTR_SET["OP_CODE"][op_code]["SUB_OP_CODE"].keys())[0] is not None
+    has_sub_op_code = op_code_has_sub_op_code(op_code)
     sub_op_code = None
     if has_sub_op_code:
         sub_op_code_bits = 5  # Last 5 bits of binary
@@ -223,18 +228,89 @@ def get_sub_op_code(op_code, bits):
     return sub_op_code
 
 
+def get_register_number(reg_bits):
+    """Converts binary bits to decimal number and uses this as the register number"""
+    # e.g. 00011 would correspond to r3
+    reg_num = int(reg_bits, 2)
+    return "r%d" % reg_num
+
+
+def get_registers(bits, op_code, sub_op_code, instr):
+    """Return the register(s) used in this instruction"""
+    registers = []
+    if not sub_op_code:
+        reg_start_bit = 5
+        reg_end_bit = 9
+        # Parse bits from index 4 (bit 5) to (exclusive) index 9 (bit 10)
+        reg_num = get_register_number(bits[reg_start_bit-1:reg_end_bit])
+        registers.append(reg_num)
+    elif instr in INSTR_WITH_SHIFT:
+        reg_start_bit = 5
+        reg_end_bit = 19
+        reg_bit_size = 5
+        c = 0
+        # Start at index 4 (bit 5), go up to bit 19, incrementing by 5 bits at a time.
+        for r in range(reg_start_bit-1, reg_end_bit, reg_bit_size):
+            if c != 1:
+                reg_num = get_register_number(bits[r:r + reg_bit_size])
+            else:
+                reg_num = str(int(bits[r:r + reg_bit_size], 2))
+            registers.append(reg_num)
+            c += 1
+    elif instr in INSTR_WITH_SUM_REGISTERS:
+        # ldi and sti load/store instrs get the memory addr by summing the three values in the register fields.
+        reg_start_bit = 5
+        reg_end_bit = 19
+        reg_bit_size = 5
+        sum = 0
+        # Start at index 4 (bit 5), go up to bit 19, incrementing by 5 bits at a time.
+        for r in range(reg_start_bit-1, reg_end_bit, reg_bit_size):
+            sum += int(bits[r:r + reg_bit_size], 2)
+        registers.append(hex(sum))
+    elif instr in INSTR_WITH_NO_REGISTERS:
+        # halt, nop, rts don't use registers, so don't bother parsing their register bits.
+        pass
+    else:
+        reg_start_bit = 5
+        reg_end_bit = 19
+        reg_bit_size = 5
+        # Start at index 4 (bit 5), go up to bit 19, incrementing by 5 bits at a time.
+        for r in range(reg_start_bit-1, reg_end_bit, reg_bit_size):
+            reg_num = get_register_number(bits[r:r + reg_bit_size])
+            registers.append(reg_num)
+    return registers
+
+
 def translate_bits(s20_output):
     """Main process for translating the bits to assembled code"""
+    addr = 0
     # Iterate over 24 bits (6 chars) at a time.
     for i in range(0, len(s20_output), S20_NUM_INSTR_NIBBLES):
         # Get instructions, 6 nibbles of the S20's output at a time.
         cur_instr = s20_output[i:i + S20_NUM_INSTR_NIBBLES]
+
         # Convert hex to raw binary bits.
         bits = hex_to_binary(cur_instr)
+
+        # Parse opcode and sub opcode.
         op_code = get_op_code(bits)
         sub_op_code = get_sub_op_code(op_code, bits)
+
+        # Lookup instr based on opcode and sub opcode.
         instr = get_instruction(op_code, sub_op_code)
-        print("INSTR %s" % instr)
+
+        # If instr can use registers, parse them.
+        registers = get_registers(bits, op_code, sub_op_code, instr)
+        registers = ", ".join(registers)
+
+        # Get interpretation, e.g. "skip" or a var name like "x"
+        interp = "\t"  # TODO
+
+        # Output
+        print("%s %s %s %s %s" % (str(addr).zfill(4), cur_instr, interp, instr, registers))
+
+        # Next line
+        addr += 1
 
 
 def main():
