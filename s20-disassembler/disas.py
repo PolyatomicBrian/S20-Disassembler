@@ -135,10 +135,13 @@ INSTR_SET = {
 INSTR_WITH_NO_REGISTERS = ["halt", "rts", "nop"]
 INSTR_WITH_SUM_REGISTERS = ["ldi", "sti"]
 INSTR_WITH_SHIFT = ["shl", "sal", "shr", "sar"]
+INSTR_WITH_BRANCH = ["br", "bsr", "brz", "bnz", "brn", "bnn"]
+
 
 ###############
 #   CLASSES   #
 ###############
+
 
 class FileService:
     def __init__(self):
@@ -235,15 +238,19 @@ def get_register_number(reg_bits):
     return "r%d" % reg_num
 
 
-def get_registers(bits, op_code, sub_op_code, instr):
-    """Return the register(s) used in this instruction"""
-    registers = []
+def get_operands(bits, op_code, sub_op_code, instr):
+    """Return the operands (registers, addresses) used in this instruction"""
+    operands = []
     if not sub_op_code:
         reg_start_bit = 5
         reg_end_bit = 9
         # Parse bits from index 4 (bit 5) to (exclusive) index 9 (bit 10)
         reg_num = get_register_number(bits[reg_start_bit-1:reg_end_bit])
-        registers.append(reg_num)
+        operands.append(reg_num)
+        addr_start_bit = 10
+        addr_end_bit = 24
+        addr = binary_to_hex(bits[addr_start_bit-1:addr_end_bit])
+        operands.append(addr)
     elif instr in INSTR_WITH_SHIFT:
         reg_start_bit = 5
         reg_end_bit = 19
@@ -255,7 +262,7 @@ def get_registers(bits, op_code, sub_op_code, instr):
                 reg_num = get_register_number(bits[r:r + reg_bit_size])
             else:
                 reg_num = str(int(bits[r:r + reg_bit_size], 2))
-            registers.append(reg_num)
+            operands.append(reg_num)
             c += 1
     elif instr in INSTR_WITH_SUM_REGISTERS:
         # ldi and sti load/store instrs get the memory addr by summing the three values in the register fields.
@@ -266,9 +273,9 @@ def get_registers(bits, op_code, sub_op_code, instr):
         # Start at index 4 (bit 5), go up to bit 19, incrementing by 5 bits at a time.
         for r in range(reg_start_bit-1, reg_end_bit, reg_bit_size):
             sum += int(bits[r:r + reg_bit_size], 2)
-        registers.append(hex(sum))
+        operands.append(hex(sum))
     elif instr in INSTR_WITH_NO_REGISTERS:
-        # halt, nop, rts don't use registers, so don't bother parsing their register bits.
+        # halt, nop, rts don't use operands, so don't bother parsing their register bits.
         pass
     else:
         reg_start_bit = 5
@@ -277,13 +284,48 @@ def get_registers(bits, op_code, sub_op_code, instr):
         # Start at index 4 (bit 5), go up to bit 19, incrementing by 5 bits at a time.
         for r in range(reg_start_bit-1, reg_end_bit, reg_bit_size):
             reg_num = get_register_number(bits[r:r + reg_bit_size])
-            registers.append(reg_num)
-    return registers
+            operands.append(reg_num)
+    return operands
+
+
+def build_btree(btree, instrs):
+    instr = instrs[0][3]
+    addr = instrs[0][0]
+    btree[addr] = {}
+    print_debug("Current instruction %s" % instr)
+    if instr == "halt":
+        btree[addr]["LEFT"] = None
+        btree[addr]["RIGHT"] = None
+        return btree
+    elif instr in INSTR_WITH_BRANCH:
+        print_debug("Current address %s" % addr)
+        addr_to_jump_to = instrs[0][-1].rsplit(', ')[-1].zfill(4)
+        print_debug("Address to Jump to %s" % addr_to_jump_to)
+        instrs.pop(0)
+
+        # Build left tree
+        btree[addr]["LEFT"] = build_btree({}, instrs)
+
+        # Build right tree
+        # This is based on where a branch jumps to.
+        for i in range(0, len(instrs)):
+            if instrs[0][0] == addr_to_jump_to:
+                btree[addr]["RIGHT"] = build_btree({}, instrs)
+                break
+            else:
+                instrs.pop(0)
+        return btree
+    else:
+        instrs.pop(0)
+        btree[addr]["LEFT"] = build_btree({}, instrs)
+        btree[addr]["RIGHT"] = None
+        return btree
 
 
 def translate_bits(s20_output):
     """Main process for translating the bits to assembled code"""
     addr = 0
+    instrs = []
     # Iterate over 24 bits (6 chars) at a time.
     for i in range(0, len(s20_output), S20_NUM_INSTR_NIBBLES):
         # Get instructions, 6 nibbles of the S20's output at a time.
@@ -299,25 +341,44 @@ def translate_bits(s20_output):
         # Lookup instr based on opcode and sub opcode.
         instr = get_instruction(op_code, sub_op_code)
 
-        # If instr can use registers, parse them.
-        registers = get_registers(bits, op_code, sub_op_code, instr)
-        registers = ", ".join(registers)
+        # If instr can use operands, parse them.
+        operands = get_operands(bits, op_code, sub_op_code, instr)
+        operands = ", ".join(operands)
 
-        # Get interpretation, e.g. "skip" or a var name like "x"
-        interp = "\t"  # TODO
+        interp = "\t"
+        instrs.append([str(hex(addr))[2:].zfill(4), cur_instr, interp, instr, operands])
 
         # Output
-        print("%s %s %s %s %s" % (str(addr).zfill(4), cur_instr, interp, instr, registers))
+        print("%s" % " ".join(instrs[addr]))
 
         # Next line
         addr += 1
+    return instrs
+
+
+def process_data(instrs):
+    """Figures out program flow to determine how data is used"""
+    btree = build_btree({}, instrs)
+    print_debug(btree)
+
+    #for instr in instrs:
+    #    if instr[0] not in btree
+
+    node = btree
+    # Iterate over tree until we find a branch.
+    while node[list(node.keys())[0]]["RIGHT"] is None:
+        node = node[list(node.keys())[0]]["LEFT"]
+    print("Done %s" % node)
+
+
 
 
 def main():
     """Program driver"""
     file_service = FileService()
     s20_output = file_service.get_content_from_file()
-    translate_bits(s20_output)
+    instrs = translate_bits(s20_output)
+    process_data(instrs)
 
 
 #############
