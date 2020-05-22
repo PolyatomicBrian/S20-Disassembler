@@ -16,7 +16,11 @@ import sys
 #  GLOBALS  #
 #############
 
-IS_DEBUG = True
+# Counter for variable names
+data_count = 0
+skip_count = 0
+
+IS_DEBUG = False
 
 S20_OUTPUT_FILE = "sample.hex"
 
@@ -238,53 +242,80 @@ def get_register_number(reg_bits):
     return "r%d" % reg_num
 
 
+def get_operands_shift_instr(bits):
+    """Parse bits based on the encoding of shift instructions"""
+    reg_start_bit = 5
+    reg_end_bit = 19
+    reg_bit_size = 5
+    c = 0
+    operands = []
+    # Start at index 4 (bit 5), go up to bit 19, incrementing by 5 bits at a time.
+    for r in range(reg_start_bit - 1, reg_end_bit, reg_bit_size):
+        if c != 1:
+            reg_num = get_register_number(bits[r:r + reg_bit_size])
+        else:
+            reg_num = str(int(bits[r:r + reg_bit_size], 2))
+        operands.append(reg_num)
+        c += 1
+    return operands
+
+
+def get_operands_sum_instr(bits):
+    """Parse bits based on the encoding of instructions that sum their registers"""
+    # ldi and sti load/store instrs get the memory addr by summing the three values in the register fields.
+    reg_start_bit = 5
+    reg_end_bit = 19
+    reg_bit_size = 5
+    sum = 0
+    # Start at index 4 (bit 5), go up to bit 19, incrementing by 5 bits at a time.
+    for r in range(reg_start_bit - 1, reg_end_bit, reg_bit_size):
+        sum += int(bits[r:r + reg_bit_size], 2)
+    return [hex(sum)]
+
+
+def get_operands_sub_op_code(bits):
+    """Parse bits based on encoding of instructions that have sub opcodes
+       but aren't shift, sum-registers, or no-registers types"""
+    reg_start_bit = 5
+    reg_end_bit = 19
+    reg_bit_size = 5
+    operands = []
+    # Start at index 4 (bit 5), go up to bit 19, incrementing by 5 bits at a time.
+    for r in range(reg_start_bit - 1, reg_end_bit, reg_bit_size):
+        reg_num = get_register_number(bits[r:r + reg_bit_size])
+        operands.append(reg_num)
+    return operands
+
+
+def get_operands_no_sub_op(bits):
+    """Parse bits based on encoding of instructions that don't have sub opcodes"""
+    reg_start_bit = 5
+    reg_end_bit = 9
+    addr_start_bit = 10
+    addr_end_bit = 24
+    operands = []
+    # Parse bits from index 4 (bit 5) to (exclusive) index 9 (bit 10)
+    reg_num = get_register_number(bits[reg_start_bit - 1:reg_end_bit])
+    operands.append(reg_num)
+    addr = binary_to_hex(bits[addr_start_bit - 1:addr_end_bit])
+    operands.append(addr)
+    return operands
+
+
 def get_operands(bits, op_code, sub_op_code, instr):
     """Return the operands (registers, addresses) used in this instruction"""
     operands = []
     if not sub_op_code:
-        reg_start_bit = 5
-        reg_end_bit = 9
-        # Parse bits from index 4 (bit 5) to (exclusive) index 9 (bit 10)
-        reg_num = get_register_number(bits[reg_start_bit-1:reg_end_bit])
-        operands.append(reg_num)
-        addr_start_bit = 10
-        addr_end_bit = 24
-        addr = binary_to_hex(bits[addr_start_bit-1:addr_end_bit])
-        operands.append(addr)
+        operands = get_operands_no_sub_op(bits)
     elif instr in INSTR_WITH_SHIFT:
-        reg_start_bit = 5
-        reg_end_bit = 19
-        reg_bit_size = 5
-        c = 0
-        # Start at index 4 (bit 5), go up to bit 19, incrementing by 5 bits at a time.
-        for r in range(reg_start_bit-1, reg_end_bit, reg_bit_size):
-            if c != 1:
-                reg_num = get_register_number(bits[r:r + reg_bit_size])
-            else:
-                reg_num = str(int(bits[r:r + reg_bit_size], 2))
-            operands.append(reg_num)
-            c += 1
+        operands = get_operands_shift_instr(bits)
     elif instr in INSTR_WITH_SUM_REGISTERS:
-        # ldi and sti load/store instrs get the memory addr by summing the three values in the register fields.
-        reg_start_bit = 5
-        reg_end_bit = 19
-        reg_bit_size = 5
-        sum = 0
-        # Start at index 4 (bit 5), go up to bit 19, incrementing by 5 bits at a time.
-        for r in range(reg_start_bit-1, reg_end_bit, reg_bit_size):
-            sum += int(bits[r:r + reg_bit_size], 2)
-        operands.append(hex(sum))
+        operands = get_operands_sum_instr(bits)
     elif instr in INSTR_WITH_NO_REGISTERS:
         # halt, nop, rts don't use operands, so don't bother parsing their register bits.
         pass
     else:
-        reg_start_bit = 5
-        reg_end_bit = 19
-        reg_bit_size = 5
-        # Start at index 4 (bit 5), go up to bit 19, incrementing by 5 bits at a time.
-        for r in range(reg_start_bit-1, reg_end_bit, reg_bit_size):
-            reg_num = get_register_number(bits[r:r + reg_bit_size])
-            operands.append(reg_num)
+        operands = get_operands_sub_op_code(bits)
     return operands
 
 
@@ -292,20 +323,21 @@ def build_btree(btree, instrs):
     instr = instrs[0][3]
     addr = instrs[0][0]
     btree[addr] = {}
-    print_debug("Current instruction %s" % instr)
+    # Recursive base case: halt implies we're at the end of a branch.
     if instr == "halt":
         btree[addr]["LEFT"] = None
         btree[addr]["RIGHT"] = None
         return btree
+    # If we have a branch, then we create two child nodes.
     elif instr in INSTR_WITH_BRANCH:
-        print_debug("Current address %s" % addr)
+        # instrs is a list of all instructions
+        # e.g. [[addr, machine_code, interp, instr, operands], repeat_for_each_instr]
+        # So parse out the first instr in the list, get the last element (operands), and get the last operand.
+        # For branches, this is the address to jump to.
         addr_to_jump_to = instrs[0][-1].rsplit(', ')[-1].zfill(4)
-        print_debug("Address to Jump to %s" % addr_to_jump_to)
         instrs.pop(0)
-
         # Build left tree
         btree[addr]["LEFT"] = build_btree({}, instrs)
-
         # Build right tree
         # This is based on where a branch jumps to.
         for i in range(0, len(instrs)):
@@ -315,6 +347,7 @@ def build_btree(btree, instrs):
             else:
                 instrs.pop(0)
         return btree
+    # Else not a halt nor a branch, so tack next instrs onto left child and keep going.
     else:
         instrs.pop(0)
         btree[addr]["LEFT"] = build_btree({}, instrs)
@@ -345,32 +378,78 @@ def translate_bits(s20_output):
         operands = get_operands(bits, op_code, sub_op_code, instr)
         operands = ", ".join(operands)
 
-        interp = "\t"
+        interp = "\t\t"
         instrs.append([str(hex(addr))[2:].zfill(4), cur_instr, interp, instr, operands])
-
-        # Output
-        print("%s" % " ".join(instrs[addr]))
 
         # Next line
         addr += 1
     return instrs
 
 
+def lookup_instr_by_addr(addr, instrs):
+    for instr in instrs:
+        if instr[0] == addr:
+            return instr
+
+
+def lookup_data_addr(instr):
+    data_addr_start_bit = 10
+    data_addr_end_bit = 24
+    addr = instr[1]
+    bin_addr = hex_to_binary(addr)
+    data_addr = binary_to_hex(bin_addr[data_addr_start_bit - 1:data_addr_end_bit])
+    return data_addr
+
+
+def label_data(node, instrs):
+    """Traverse binary tree of prog flow to label data"""
+    global data_count, skip_count
+    addr = list(node.keys())[0]
+    instr = lookup_instr_by_addr(addr, instrs)
+    if instr[3] == "ld" or instr[3] == "st":
+        data_addr = lookup_data_addr(instr).zfill(4)
+        data_instr = lookup_instr_by_addr(data_addr, instrs)
+        # Symbol names are d#, e.g. d0 or d1 or d2 or ...
+        label = 'd' + str(data_count)
+        # If data already exists at that address, reference that already-existing label.
+        if data_instr[2] != "\t\t":
+            label = data_instr[2]
+        # Fix format of operands depending on whether instruction is ld or st.
+        if instr[3] == "ld":
+            instr[4] = label + ", " + instr[4].split(",")[0]
+        elif instr[3] == "st":
+            instr[4] = instr[4].split(",")[0] + ", " + label
+        # Add symbol to the data address, overwrite existing (unused) instruction with "data".
+        data_instr[2] = label.ljust(8)
+        data_instr[3] = "data"
+        data_instr[4] = str(0)
+        data_count += 1
+    if instr[3] in INSTR_WITH_BRANCH:
+        label = "skip" + str(skip_count)
+        jmp_addr = lookup_data_addr(instr).zfill(4)
+        jmp_instr = lookup_instr_by_addr(jmp_addr, instrs)
+        if jmp_instr[2] != "\t\t":
+            label = jmp_instr[2]
+        instr[4] = instr[4].split(",")[0] + ", " + label
+        jmp_instr[2] = label.ljust(8)
+        skip_count += 1
+    # Check remaining nodes.
+    left_node = node[list(node.keys())[0]]["LEFT"]
+    right_node = node[list(node.keys())[0]]["RIGHT"]
+    if left_node is not None:
+        label_data(left_node, instrs)
+    if right_node is not None:
+        label_data(right_node, instrs)
+
+
 def process_data(instrs):
     """Figures out program flow to determine how data is used"""
-    btree = build_btree({}, instrs)
-    print_debug(btree)
-
-    #for instr in instrs:
-    #    if instr[0] not in btree
-
-    node = btree
-    # Iterate over tree until we find a branch.
-    while node[list(node.keys())[0]]["RIGHT"] is None:
-        node = node[list(node.keys())[0]]["LEFT"]
-    print("Done %s" % node)
-
-
+    tree_instrs = instrs.copy()
+    btree = build_btree({}, tree_instrs)
+    label_data(btree, instrs)
+    # Final output
+    for instr in instrs:
+        print("%s" % " ".join(instr))
 
 
 def main():
