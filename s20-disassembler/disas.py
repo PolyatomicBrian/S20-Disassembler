@@ -262,15 +262,20 @@ def get_operands_shift_instr(bits):
 
 def get_operands_sum_instr(bits):
     """Parse bits based on the encoding of instructions that sum their registers"""
-    # ldi and sti load/store instrs get the memory addr by summing the three values in the register fields.
+    # ldi and sti load/store instrs get the memory addr by summing the rA and rB register contents.
     reg_start_bit = 5
     reg_end_bit = 19
     reg_bit_size = 5
     sum = 0
+    operands = []
     # Start at index 4 (bit 5), go up to bit 19, incrementing by 5 bits at a time.
     for r in range(reg_start_bit - 1, reg_end_bit, reg_bit_size):
-        sum += int(bits[r:r + reg_bit_size], 2)
-    return [hex(sum)]
+        reg_num = get_register_number(bits[r:r + reg_bit_size])
+        operands.append(reg_num)
+    # For sti, rC is the source address, so swap it from the final element of the list (index 2) to the first (index 0)
+    if get_instruction(get_op_code(bits), get_sub_op_code(get_op_code(bits), bits)) == "sti":
+        operands[0], operands[2] = operands[2], operands[0]
+    return operands
 
 
 def get_operands_sub_op_code(bits):
@@ -337,17 +342,30 @@ def build_btree(btree, list_instrs):
         # For branches, this is the address to jump to.
         addr_to_jump_to = instrs[0][-1].rsplit(', ')[-1].zfill(4)
         instrs.pop(0)
-        # Build left tree
-        btree[addr]["LEFT"] = build_btree({}, instrs)
-        # Build right tree
-        # This is based on where a branch jumps to.
-        for i in range(0, len(instrs)):
-            if instrs[0][0] == addr_to_jump_to:
-                btree[addr]["RIGHT"] = build_btree({}, instrs)
-                break
-            else:
-                instrs.pop(0)
-        return btree
+
+        if instr != "br" and instr != "bsr":
+            # Build left tree
+            btree[addr]["LEFT"] = build_btree({}, instrs)
+            # Build right tree
+            # This is based on where a branch jumps to.
+            for i in range(0, len(instrs)):
+                if instrs[0][0] == addr_to_jump_to:
+                    btree[addr]["RIGHT"] = build_btree({}, instrs)
+                    break
+                else:
+                    instrs.pop(0)
+            return btree
+        else:
+            btree[addr]["RIGHT"] = None
+            # Build left tree
+            # This is based on where a branch jumps to.
+            for i in range(0, len(instrs)):
+                if instrs[0][0] == addr_to_jump_to:
+                    btree[addr]["LEFT"] = build_btree({}, instrs)
+                    break
+                else:
+                    instrs.pop(0)
+            return btree
     # Else not a halt/rts nor a branch, so tack next instrs onto left child and keep going.
     else:
         instrs.pop(0)
@@ -440,9 +458,13 @@ def label_data(node, instrs):
         jmp_instr = lookup_instr_by_addr(jmp_addr, instrs)
         if jmp_instr[2] != "        ":
             label = jmp_instr[2]
-        instr[4] = instr[4].split(",")[0] + ", " + label
+        if instr[3] == "br" or instr[3] == "bsr":
+            instr[4] = label
+        else:
+            instr[4] = instr[4].split(",")[0] + ", " + label
         jmp_instr[2] = label.ljust(8)
         skip_count += 1
+
     # Check remaining nodes.
     left_node = node[list(node.keys())[0]]["LEFT"]
     right_node = node[list(node.keys())[0]]["RIGHT"]
